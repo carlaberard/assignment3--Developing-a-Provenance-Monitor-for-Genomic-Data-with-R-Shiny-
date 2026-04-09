@@ -12,12 +12,14 @@ library(jsonlite)
 # 1) CONFIGURATION
 # =========================
 
+# Project root
+project_dir <- "C:/Users/carla/OneDrive/Escritorio/URL/4º/2º/Data science/assignment 3"
+
 # Folder containing the 100 JSON files
-json_folder <- "data/provenance_json"
+json_folder <- file.path(project_dir, "data", "provenance_json")
 
 # MongoDB Atlas connection string
-# Replace with your real cluster URL
-mongo_url <- "mongodb+srv://carlaberardg_db_user:4jvR6ufQHlPJkfpZ@cluster0.xxxxx.mongodb.net/"
+mongo_url <- "mongodb://localhost"
 
 # Database and collection names
 db_name <- "genomics_db"
@@ -27,20 +29,12 @@ collection_name <- "provenance"
 drop_collection_first <- TRUE
 
 # =========================
-# 2) CONNECT TO MONGODB
+# 2) CHECK JSON FOLDER
 # =========================
 
-conn <- mongo(
-  collection = collection_name,
-  db = db_name,
-  url = mongo_url
-)
-
-cat("Connected to MongoDB.\n")
-
-# =========================
-# 3) FIND JSON FILES
-# =========================
+if (!dir.exists(json_folder)) {
+  stop("JSON folder does not exist: ", json_folder)
+}
 
 json_files <- list.files(
   path = json_folder,
@@ -55,6 +49,18 @@ if (length(json_files) == 0) {
 }
 
 # =========================
+# 3) CONNECT TO MONGODB
+# =========================
+
+conn <- mongo(
+  collection = collection_name,
+  db = db_name,
+  url = mongo_url
+)
+
+cat("Connected to MongoDB.\n")
+
+# =========================
 # 4) OPTIONAL: CLEAR COLLECTION
 # =========================
 
@@ -62,7 +68,6 @@ if (drop_collection_first) {
   conn$drop()
   cat("Existing collection dropped.\n")
   
-  # Reconnect after drop to ensure clean state
   conn <- mongo(
     collection = collection_name,
     db = db_name,
@@ -80,8 +85,10 @@ failed_files <- character()
 
 for (file in json_files) {
   tryCatch({
-    # Read raw JSON text
-    json_text <- paste(readLines(file, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+    json_text <- paste(
+      readLines(file, warn = FALSE, encoding = "UTF-8"),
+      collapse = "\n"
+    )
     
     # Validate JSON before inserting
     fromJSON(json_text, simplifyVector = FALSE)
@@ -115,6 +122,5 @@ if (length(failed_files) > 0) {
   print(failed_files)
 }
 
-# Preview first few documents
 cat("\nPreview of stored documents:\n")
 print(conn$find(limit = 3))
