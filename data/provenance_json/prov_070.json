@@ -1,0 +1,61 @@
+{
+  "@context": "http://www.w3.org/ns/prov#",
+  "@id": "urn:uuid:48dce6b3-c092-4e47-b8b3-c66e209f4ed2",
+  "@type": "Activity",
+  "label": "Complete processing of 3D_ANVA_070_S3",
+  "startTime": "2026-04-02T05:20:00Z",
+  "endTime": "2026-04-02T05:32:27Z",
+  "executionNode": "cresselia",
+  "sourceDirectory": "/data/input/",
+  "destinationDirectory": "/data/output/3D_ANVA_070_S3",
+  "wasAssociatedWith": [
+    {
+      "@type": "SoftwareAgent",
+      "label": "seqfu",
+      "version": "1.21.0"
+    },
+    {
+      "@type": "SoftwareAgent",
+      "label": "sha256sum",
+      "version": "sha256sum (GNU coreutils) 8.32"
+    },
+    {
+      "@type": "SoftwareAgent",
+      "label": "Pipeline Nextflow fastq_prov",
+      "repository": "local",
+      "commitId": "N/A",
+      "revision": "N/A"
+    },
+    {
+      "@id": "urn:person:lab_user1",
+      "@type": "Person",
+      "label": "Executor user: lab_user1",
+      "actedOnBehalfOf": {
+        "@id": "https://ror.org/01y990p52",
+        "@type": "Organization",
+        "label": "La Salle"
+      }
+    }
+  ],
+  "generated": [
+    {
+      "@type": "Entity",
+      "label": "SHA256 Verification",
+      "description": "Checksum verification result at destination",
+      "value": "3D_ANVA_070_S3_R1_001.fastq.gz: checksum matches 3D_ANVA_070_S3_R2_001.fastq.gz: checksum matches"
+    },
+    {
+      "@type": "Entity",
+      "label": "Seqfu Verification",
+      "description": "FASTQ format integrity result",
+      "value": "ERROR PE 3D_ANVA_070_S3_R1_001.fastq.gz format issue detected"
+    },
+    {
+      "@type": "Entity",
+      "label": "FASTQ Files",
+      "totalSizeBytes": "8617687314",
+      "category": "Genet",
+      "fileCount": "2"
+    }
+  ]
+}
