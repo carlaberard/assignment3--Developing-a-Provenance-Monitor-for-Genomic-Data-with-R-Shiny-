@@ -1,8 +1,9 @@
 # app.R
 # Provenance Monitor for Genomic Data with R Shiny
+# Data source: MongoDB Atlas only
 
 # Install once if needed:
-# install.packages(c("shiny", "DT", "jsonlite", "dplyr", "lubridate", "ggplot2"))
+# install.packages(c("shiny", "DT", "jsonlite", "dplyr", "lubridate", "ggplot2", "mongolite"))
 
 library(shiny)
 library(DT)
@@ -10,15 +11,16 @@ library(jsonlite)
 library(dplyr)
 library(lubridate)
 library(ggplot2)
+library(mongolite)
 
 # =========================================
-# 1) PROJECT / DATA CONFIGURATION
+# 1) MONGODB CONFIGURATION
 # =========================================
 
-project_dir <- "C:/Users/carla/OneDrive/Escritorio/URL/4º/2º/Data science/assignment 3"
-json_folder <- file.path(project_dir, "data", "provenance_json")
+mongo_url <- "mongodb+srv://carlaberardg_db_user:1234@carlaberard.mrx5yfu.mongodb.net/?retryWrites=true&w=majority&appName=CarlaBerard"
+db_name <- "genomics_db"
+collection_name <- "provenance"
 
-# Consistent colors for execution nodes
 node_colors <- c(
   "cresselia" = "#3b82f6",
   "gengar"    = "#8b5cf6",
@@ -44,14 +46,14 @@ extract_user <- function(wasAssociatedWith) {
   if (is.null(wasAssociatedWith) || length(wasAssociatedWith) == 0) {
     return(NA_character_)
   }
-  
+
   for (item in wasAssociatedWith) {
     type_value <- item[["@type"]]
     if (!is.null(type_value) && "Person" %in% unlist(type_value)) {
       return(safe_chr(item$label))
     }
   }
-  
+
   NA_character_
 }
 
@@ -59,34 +61,34 @@ extract_seqfu_version <- function(wasAssociatedWith) {
   if (is.null(wasAssociatedWith) || length(wasAssociatedWith) == 0) {
     return(NA_character_)
   }
-  
+
   for (item in wasAssociatedWith) {
     label_value <- item$label
-    if (!is.null(label_value) && "seqfu" %in% unlist(label_value)) {
+    if (!is.null(label_value) && any(grepl("seqfu", unlist(label_value), ignore.case = TRUE))) {
       return(safe_chr(item$version))
     }
   }
-  
+
   NA_character_
 }
 
 extract_generated_item <- function(generated, label_name) {
   if (is.null(generated) || length(generated) == 0) return(NULL)
-  
+
   for (item in generated) {
     label_value <- item$label
     if (!is.null(label_value) && label_name %in% unlist(label_value)) {
       return(item)
     }
   }
-  
+
   NULL
 }
 
 parse_sha_status <- function(generated) {
   item <- extract_generated_item(generated, "SHA256 Verification")
   if (is.null(item)) return(NA_character_)
-  
+
   value <- tolower(safe_chr(item$value, ""))
   if (grepl("failed|error|mismatch|does not match", value)) {
     return("Failed")
@@ -97,7 +99,7 @@ parse_sha_status <- function(generated) {
 parse_seqfu_status <- function(generated) {
   item <- extract_generated_item(generated, "Seqfu Verification")
   if (is.null(item)) return(NA_character_)
-  
+
   value <- tolower(safe_chr(item$value, ""))
   if (grepl("^ok|\\bok\\b", value)) {
     return("Passed")
@@ -117,33 +119,50 @@ extract_file_count <- function(generated) {
   safe_num(item$fileCount)
 }
 
-read_json_documents <- function(folder) {
-  files <- list.files(folder, pattern = "\\.json$", full.names = TRUE)
-  
-  docs <- lapply(files, function(f) {
-    doc <- fromJSON(
-      f,
+connect_mongo <- function() {
+  mongo(
+    collection = collection_name,
+    db = db_name,
+    url = mongo_url
+  )
+}
+
+read_mongo_documents <- function() {
+  conn <- connect_mongo()
+  raw_docs <- conn$find('{}')
+
+  if (nrow(raw_docs) == 0) {
+    return(list())
+  }
+
+  docs <- lapply(seq_len(nrow(raw_docs)), function(i) {
+    row_list <- as.list(raw_docs[i, , drop = FALSE])
+
+    if ("_id" %in% names(row_list)) {
+      row_list[["_id"]] <- NULL
+    }
+
+    fromJSON(
+      toJSON(row_list, auto_unbox = TRUE, null = "null"),
       simplifyVector = FALSE,
       simplifyDataFrame = FALSE,
       simplifyMatrix = FALSE
     )
-    doc$source_file <- basename(f)
-    doc
   })
-  
+
   docs
 }
 
 docs_to_table <- function(docs) {
   if (length(docs) == 0) return(data.frame())
-  
+
   rows <- lapply(docs, function(doc) {
     start_time <- ymd_hms(safe_chr(doc$startTime), tz = "UTC", quiet = TRUE)
     end_time   <- ymd_hms(safe_chr(doc$endTime), tz = "UTC", quiet = TRUE)
-    
+
     total_size_bytes <- extract_total_size_bytes(doc$generated)
     duration_mins <- as.numeric(difftime(end_time, start_time, units = "mins"))
-    
+
     data.frame(
       prov_id = safe_chr(doc[["@id"]]),
       source_file = safe_chr(doc$source_file),
@@ -163,7 +182,7 @@ docs_to_table <- function(docs) {
       stringsAsFactors = FALSE
     )
   })
-  
+
   bind_rows(rows)
 }
 
@@ -176,20 +195,32 @@ match_integrity_filter <- function(df, mode) {
   rep(TRUE, nrow(df))
 }
 
-# =========================================
-# 3) LOAD DATA
-# =========================================
-
-all_docs <- read_json_documents(json_folder)
-all_table <- docs_to_table(all_docs)
-
-if (nrow(all_table) == 0) {
-  stop("No JSON documents found in the data/provenance_json folder.")
+build_display_table <- function(df) {
+  df %>%
+    mutate(
+      run_status = ifelse(
+        sha256_status == "Failed" | seqfu_status == "Failed",
+        "Failed",
+        "Passed"
+      )
+    ) %>%
+    select(
+      prov_id,
+      source_file,
+      label,
+      executionNode,
+      user,
+      seqfu_version,
+      startTime,
+      endTime,
+      duration_min,
+      sha256_status,
+      seqfu_status,
+      total_size_gb,
+      fileCount,
+      run_status
+    )
 }
-
-# =========================================
-# 4) UI HELPERS
-# =========================================
 
 metric_card <- function(title, output_id, accent = "#4f46e5") {
   div(
@@ -209,7 +240,38 @@ panel_card <- function(title, ...) {
 }
 
 # =========================================
-# 5) UI
+# 3) INITIAL LOAD FROM MONGODB
+# =========================================
+
+all_docs <- tryCatch(
+  read_mongo_documents(),
+  error = function(e) {
+    stop(
+      paste0(
+        "Error connecting to MongoDB Atlas.\n",
+        "Check the connection string, password, database user permissions, and network access.\n\n",
+        "Original error: ", e$message
+      )
+    )
+  }
+)
+
+all_table <- docs_to_table(all_docs)
+
+if (nrow(all_table) == 0) {
+  stop(
+    paste0(
+      "No documents found in MongoDB collection '",
+      collection_name,
+      "' in database '",
+      db_name,
+      "'. Run scripts/import_mongo.R first."
+    )
+  )
+}
+
+# =========================================
+# 4) UI
 # =========================================
 
 ui <- fluidPage(
@@ -221,12 +283,10 @@ ui <- fluidPage(
         font-family: 'Segoe UI', Arial, sans-serif;
         color: #1f2937;
       }
-      
       .container-fluid {
         padding-left: 22px;
         padding-right: 22px;
       }
-      
       .app-header {
         background: linear-gradient(135deg, #1e293b, #334155);
         color: white;
@@ -235,95 +295,79 @@ ui <- fluidPage(
         margin: 18px 0 20px 0;
         box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18);
       }
-      
       .app-title {
         font-size: 34px;
         font-weight: 700;
         margin-bottom: 6px;
         line-height: 1.15;
       }
-      
       .app-subtitle {
         font-size: 15px;
         opacity: 0.9;
       }
-      
       .sidebar-card, .panel-card, .metric-card {
         background: white;
         border-radius: 16px;
         box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
         border: 1px solid #e5e7eb;
       }
-      
       .sidebar-card {
         padding: 18px;
         margin-bottom: 18px;
       }
-      
       .panel-card {
         padding: 18px;
         margin-bottom: 18px;
       }
-      
       .panel-title {
         font-size: 18px;
         font-weight: 700;
         margin-bottom: 14px;
         color: #111827;
       }
-      
       .metric-card {
         padding: 16px 18px;
         min-height: 118px;
         margin-bottom: 18px;
       }
-      
       .metric-title {
         font-size: 14px;
         font-weight: 600;
         color: #6b7280;
         margin-bottom: 10px;
       }
-      
       .metric-value {
         font-size: 30px;
         font-weight: 800;
         color: #111827;
       }
-      
       .filter-title {
         font-size: 18px;
         font-weight: 700;
         margin-bottom: 14px;
       }
-      
       .control-label {
         font-weight: 600;
         color: #374151;
       }
-      
       .form-control, .selectize-input {
         border-radius: 10px !important;
         border: 1px solid #d1d5db !important;
         box-shadow: none !important;
       }
-      
       .btn, .btn-default {
         border-radius: 10px !important;
         font-weight: 600;
       }
-      
       .btn-primary, .btn-default {
         background: #2563eb !important;
         color: white !important;
         border: none !important;
       }
-      
       .nav-tabs {
         border-bottom: none;
         margin-bottom: 10px;
       }
-      
       .nav-tabs > li > a {
         border-radius: 10px !important;
         border: none !important;
@@ -332,24 +376,20 @@ ui <- fluidPage(
         margin-right: 8px;
         font-weight: 600;
       }
-      
       .nav-tabs > li.active > a,
       .nav-tabs > li.active > a:hover,
       .nav-tabs > li.active > a:focus {
         background: #2563eb !important;
         color: white !important;
       }
-      
       .dataTables_wrapper .dataTables_filter input,
       .dataTables_wrapper .dataTables_length select {
         border-radius: 8px;
         border: 1px solid #d1d5db;
       }
-      
       table.dataTable tbody tr.selected {
         background-color: #dbeafe !important;
       }
-      
       pre {
         white-space: pre-wrap;
         word-break: break-word;
@@ -357,7 +397,6 @@ ui <- fluidPage(
         line-height: 1.45;
         margin-bottom: 0;
       }
-      
       .schema-box {
         max-height: 480px;
         overflow-y: auto;
@@ -368,23 +407,23 @@ ui <- fluidPage(
       }
     "))
   ),
-  
+
   div(
     class = "app-header",
     div(class = "app-title", "Provenance Monitor for Genomic Data"),
     div(
       class = "app-subtitle",
-      "Interactive dashboard for system health, execution efficiency, throughput, and full provenance inspection."
+      "Interactive dashboard for system health, execution efficiency, throughput, and full provenance inspection from MongoDB Atlas."
     )
   ),
-  
+
   fluidRow(
     column(
       width = 3,
       div(
         class = "sidebar-card",
         div(class = "filter-title", "Filters"),
-        
+
         selectInput(
           "node_filter",
           "Execution node",
@@ -392,14 +431,14 @@ ui <- fluidPage(
           selected = "All",
           multiple = TRUE
         ),
-        
+
         selectInput(
           "integrity_filter",
           "Integrity status",
           choices = c("All", "All passed", "Any failure", "SHA256 failed", "Seqfu failed"),
           selected = "All"
         ),
-        
+
         dateRangeInput(
           "date_filter",
           "Start date range",
@@ -408,21 +447,21 @@ ui <- fluidPage(
           min = min(all_table$start_date, na.rm = TRUE),
           max = max(all_table$start_date, na.rm = TRUE)
         ),
-        
-        actionButton("refresh_data", "Refresh data")
+
+        actionButton("refresh_data", "Refresh data from MongoDB")
       )
     ),
-    
+
     column(
       width = 9,
-      
+
       fluidRow(
         column(3, metric_card("Records", "records_value", "#2563eb")),
         column(3, metric_card("Integrity Failures", "failed_checks_value", "#f59e0b")),
         column(3, metric_card("Total Data Processed (GB)", "throughput_value", "#10b981")),
         column(3, metric_card("Average Processing Time (min)", "avg_duration_value", "#8b5cf6"))
       ),
-      
+
       tabsetPanel(
         tabPanel(
           "Overview",
@@ -453,7 +492,7 @@ ui <- fluidPage(
             )
           )
         ),
-        
+
         tabPanel(
           "Records",
           br(),
@@ -462,7 +501,7 @@ ui <- fluidPage(
             DTOutput("prov_table")
           )
         ),
-        
+
         tabPanel(
           "Schema Viewer",
           br(),
@@ -478,68 +517,82 @@ ui <- fluidPage(
 )
 
 # =========================================
-# 6) SERVER
+# 5) SERVER
 # =========================================
 
 server <- function(input, output, session) {
-  
+
   docs_rv <- reactiveVal(all_docs)
   table_rv <- reactiveVal(all_table)
-  
+
   observeEvent(input$refresh_data, {
-    docs <- read_json_documents(json_folder)
-    tbl <- docs_to_table(docs)
-    docs_rv(docs)
-    table_rv(tbl)
+    docs <- tryCatch(
+      read_mongo_documents(),
+      error = function(e) {
+        showNotification(
+          paste("MongoDB refresh failed:", e$message),
+          type = "error",
+          duration = 8
+        )
+        return(NULL)
+      }
+    )
+
+    if (!is.null(docs) && length(docs) > 0) {
+      tbl <- docs_to_table(docs)
+      docs_rv(docs)
+      table_rv(tbl)
+      showNotification("Data refreshed successfully from MongoDB.", type = "message", duration = 4)
+    }
   })
-  
+
   filtered_table <- reactive({
     df <- table_rv()
-    
+
     if (!("All" %in% input$node_filter)) {
       df <- df %>% filter(executionNode %in% input$node_filter)
     }
-    
+
     keep_integrity <- match_integrity_filter(df, input$integrity_filter)
     df <- df[keep_integrity, , drop = FALSE]
-    
+
     df <- df %>%
       filter(
         start_date >= input$date_filter[1],
         start_date <= input$date_filter[2]
       )
-    
+
     df
   })
-  
+
   output$records_value <- renderText({
     nrow(filtered_table())
   })
-  
+
   output$failed_checks_value <- renderText({
     df <- filtered_table()
     sum(df$sha256_status == "Failed" | df$seqfu_status == "Failed", na.rm = TRUE)
   })
-  
+
   output$throughput_value <- renderText({
     df <- filtered_table()
     round(sum(df$total_size_gb, na.rm = TRUE), 2)
   })
-  
+
   output$avg_duration_value <- renderText({
     df <- filtered_table()
     round(mean(df$duration_min, na.rm = TRUE), 2)
   })
-  
+
   output$duration_plot <- renderPlot({
     df <- filtered_table() %>%
       group_by(executionNode) %>%
       summarise(avg_duration = mean(duration_min, na.rm = TRUE), .groups = "drop")
-    
+
     shiny::validate(
       shiny::need(nrow(df) > 0, "No data available for this filter selection.")
     )
-    
+
     ggplot(df, aes(x = executionNode, y = avg_duration, fill = executionNode)) +
       geom_col(width = 0.7) +
       scale_fill_manual(values = node_colors, drop = FALSE) +
@@ -555,16 +608,16 @@ server <- function(input, output, session) {
         axis.text.x = element_text(angle = 0, hjust = 0.5)
       )
   })
-  
+
   output$throughput_plot <- renderPlot({
     df <- filtered_table() %>%
       group_by(executionNode) %>%
       summarise(total_gb = sum(total_size_gb, na.rm = TRUE), .groups = "drop")
-    
+
     shiny::validate(
       shiny::need(nrow(df) > 0, "No data available for this filter selection.")
     )
-    
+
     ggplot(df, aes(x = executionNode, y = total_gb, fill = executionNode)) +
       geom_col(width = 0.7) +
       scale_fill_manual(values = node_colors, drop = FALSE) +
@@ -580,7 +633,7 @@ server <- function(input, output, session) {
         axis.text.x = element_text(angle = 0, hjust = 0.5)
       )
   })
-  
+
   output$failure_plot <- renderPlot({
     df <- filtered_table() %>%
       mutate(
@@ -591,11 +644,11 @@ server <- function(input, output, session) {
         )
       ) %>%
       count(run_status, name = "n")
-    
+
     shiny::validate(
       shiny::need(nrow(df) > 0, "No data available for this filter selection.")
     )
-    
+
     ggplot(df, aes(x = run_status, y = n, fill = run_status)) +
       geom_col(width = 0.55, show.legend = FALSE) +
       scale_fill_manual(values = c(
@@ -612,33 +665,10 @@ server <- function(input, output, session) {
         panel.grid.minor = element_blank()
       )
   })
-  
+
   output$prov_table <- renderDT({
-    df <- filtered_table() %>%
-      mutate(
-        run_status = ifelse(
-          sha256_status == "Failed" | seqfu_status == "Failed",
-          "Failed",
-          "Passed"
-        )
-      ) %>%
-      select(
-        prov_id,
-        source_file,
-        label,
-        executionNode,
-        user,
-        seqfu_version,
-        startTime,
-        endTime,
-        duration_min,
-        sha256_status,
-        seqfu_status,
-        total_size_gb,
-        fileCount,
-        run_status
-      )
-    
+    df <- build_display_table(filtered_table())
+
     datatable(
       df,
       selection = "single",
@@ -659,28 +689,28 @@ server <- function(input, output, session) {
       )
     )
   })
-  
+
   output$full_schema <- renderText({
     selected <- input$prov_table_rows_selected
-    df <- filtered_table()
+    shown_df <- build_display_table(filtered_table())
     docs <- docs_rv()
-    
-    if (length(selected) == 0 || nrow(df) == 0) {
+
+    if (length(selected) == 0 || nrow(shown_df) == 0) {
       return("No row selected.")
     }
-    
-    selected_id <- df$prov_id[selected[1]]
-    
+
+    selected_id <- shown_df$prov_id[selected[1]]
+
     idx <- which(vapply(
       docs,
       function(doc) identical(safe_chr(doc[["@id"]]), selected_id),
       logical(1)
     ))
-    
+
     if (length(idx) == 0) {
       return("Selected document not found.")
     }
-    
+
     toJSON(
       docs[[idx[1]]],
       pretty = TRUE,
@@ -691,7 +721,7 @@ server <- function(input, output, session) {
 }
 
 # =========================================
-# 7) RUN
+# 6) RUN
 # =========================================
 
 shinyApp(ui = ui, server = server)

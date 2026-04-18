@@ -1,36 +1,29 @@
 # scripts/import_mongo.R
-# Import all provenance JSON files from the project folder into MongoDB
-# Each JSON file becomes one MongoDB document
-
-# Install once if needed:
-# install.packages(c("mongolite", "jsonlite"))
+# Import all provenance JSON files into MongoDB Atlas
 
 library(mongolite)
 library(jsonlite)
 
-# =========================
+# =========================================
 # 1) CONFIGURATION
-# =========================
+# =========================================
 
-# Project root
-project_dir <- "C:/Users/carla/OneDrive/Escritorio/URL/4º/2º/Data science/assignment 3"
+mongo_url <- "mongodb+srv://carlaberardg_db_user:1234@carlaberard.mrx5yfu.mongodb.net/?retryWrites=true&w=majority&appName=CarlaBerard"
 
-# Folder containing the 100 JSON files
-json_folder <- file.path(project_dir, "data", "provenance_json")
-
-# MongoDB Atlas connection string
-mongo_url <- "mongodb://localhost"
-
-# Database and collection names
 db_name <- "genomics_db"
 collection_name <- "provenance"
 
-# If TRUE, deletes all existing documents in the collection before importing
 drop_collection_first <- TRUE
 
-# =========================
+project_dir <- "C:/Users/carla/OneDrive/Escritorio/URL/4º/2º/Data science/assignment 3"
+json_folder <- file.path(project_dir, "data", "provenance_json")
+
+# =========================================
 # 2) CHECK JSON FOLDER
-# =========================
+# =========================================
+
+cat("Project directory:", project_dir, "\n")
+cat("JSON folder:", json_folder, "\n")
 
 if (!dir.exists(json_folder)) {
   stop("JSON folder does not exist: ", json_folder)
@@ -48,26 +41,51 @@ if (length(json_files) == 0) {
   stop("No JSON files were found. Check the folder path: ", json_folder)
 }
 
-# =========================
+# =========================================
 # 3) CONNECT TO MONGODB
-# =========================
+# =========================================
 
-conn <- mongo(
-  collection = collection_name,
-  db = db_name,
-  url = mongo_url
+conn <- tryCatch(
+  mongo(
+    collection = collection_name,
+    db = db_name,
+    url = mongo_url
+  ),
+  error = function(e) {
+    stop(
+      paste0(
+        "Could not connect to MongoDB Atlas.\n",
+        "Check the connection string, password, user permissions, and IP access.\n\n",
+        "Original error: ", e$message
+      )
+    )
+  }
 )
 
-cat("Connected to MongoDB.\n")
+tryCatch(
+  {
+    conn$count()
+    cat("Connected to MongoDB Atlas successfully.\n")
+  },
+  error = function(e) {
+    stop(
+      paste0(
+        "MongoDB connection was created but the database is not accessible.\n",
+        "Check IP access list and database user privileges.\n\n",
+        "Original error: ", e$message
+      )
+    )
+  }
+)
 
-# =========================
+# =========================================
 # 4) OPTIONAL: CLEAR COLLECTION
-# =========================
+# =========================================
 
 if (drop_collection_first) {
   conn$drop()
   cat("Existing collection dropped.\n")
-  
+
   conn <- mongo(
     collection = collection_name,
     db = db_name,
@@ -75,9 +93,9 @@ if (drop_collection_first) {
   )
 }
 
-# =========================
+# =========================================
 # 5) IMPORT FILES
-# =========================
+# =========================================
 
 success_count <- 0
 failed_count <- 0
@@ -85,30 +103,30 @@ failed_files <- character()
 
 for (file in json_files) {
   tryCatch({
-    json_text <- paste(
-      readLines(file, warn = FALSE, encoding = "UTF-8"),
-      collapse = "\n"
+    doc <- fromJSON(
+      file,
+      simplifyVector = FALSE,
+      simplifyDataFrame = FALSE,
+      simplifyMatrix = FALSE
     )
-    
-    # Validate JSON before inserting
-    fromJSON(json_text, simplifyVector = FALSE)
-    
-    # Insert one JSON file as one MongoDB document
-    conn$insert(json_text)
-    
+
+    doc$source_file <- basename(file)
+
+    conn$insert(doc)
+
     success_count <- success_count + 1
     cat("Imported:", basename(file), "\n")
-    
+
   }, error = function(e) {
-    failed_count <- failed_count + 1
+    failed_count <<- failed_count + 1
     failed_files <<- c(failed_files, basename(file))
     cat("FAILED:", basename(file), "->", e$message, "\n")
   })
 }
 
-# =========================
+# =========================================
 # 6) VERIFY IMPORT
-# =========================
+# =========================================
 
 total_docs <- conn$count()
 
